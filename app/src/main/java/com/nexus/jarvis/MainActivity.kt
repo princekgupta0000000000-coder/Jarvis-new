@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -242,7 +243,7 @@ fun Overview(title: String, value: String, subtitle: String, click: (() -> Unit)
 
 @Composable
 fun Quick(text: String) {
-    Box(Modifier.height(58.dp).clip(RoundedCornerShape(14.dp)).background(Panel).padding(horizontal = 9.dp).weight(1f), contentAlignment = Alignment.Center) {
+    Box(Modifier.width(76.dp).height(58.dp).clip(RoundedCornerShape(14.dp)).background(Panel), contentAlignment = Alignment.Center) {
         Text(text, color = Color.White, fontSize = 10.sp)
     }
 }
