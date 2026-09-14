@@ -9,12 +9,13 @@
         android:label="JARVIS"
         android:supportsRtl="true"
         android:theme="@style/Theme.Jarvis">
-        <activity android:name=".MainActivity" android:exported="true">
+        <activity android:name=".ModelPickerActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity android:name=".MainActivity" android:exported="false" />
         <service
             android:name=".JarvisVoiceService"
             android:exported="false"
