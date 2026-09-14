@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -56,6 +57,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.time.LocalDate
@@ -224,7 +226,7 @@ fun Snapshot(title: String, text: String, click: (() -> Unit)? = null) {
 }
 
 @Composable
-fun Action(text: String, action: () -> Unit) {
+fun RowScope.Action(text: String, action: () -> Unit) {
     Box(Modifier.weight(1f).height(46.dp).clip(RoundedCornerShape(11.dp)).background(Panel2).border(1.dp, Cyan.copy(.12f), RoundedCornerShape(11.dp)).clickable { action() }, contentAlignment = Alignment.Center) {
         Text(text, color = Color.White, fontSize = 9.sp)
     }
@@ -232,7 +234,8 @@ fun Action(text: String, action: () -> Unit) {
 
 @Composable
 fun AttendanceDialog(close: () -> Unit) {
-    val store = remember { JarvisStore(androidx.compose.ui.platform.LocalContext.current) }
+    val context = LocalContext.current
+    val store = remember(context) { JarvisStore(context) }
     var present by remember { mutableStateOf(store.getPresent().toString()) }
     var total by remember { mutableStateOf(store.getTotal().toString()) }
     var target by remember { mutableStateOf(store.getTarget().toString()) }
@@ -257,7 +260,8 @@ fun AttendanceDialog(close: () -> Unit) {
 
 @Composable
 fun ScheduleScreen() {
-    val store = remember { JarvisStore(androidx.compose.ui.platform.LocalContext.current) }
+    val context = LocalContext.current
+    val store = remember(context) { JarvisStore(context) }
     val rows = store.getSchedule()
     val days = listOf("MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY")
     LazyColumn(Modifier.fillMaxSize().padding(18.dp)) {
@@ -301,7 +305,8 @@ fun ProgressCard(title: String, progress: Float) {
 
 @Composable
 fun TasksScreen() {
-    val store = remember { JarvisStore(androidx.compose.ui.platform.LocalContext.current) }
+    val context = LocalContext.current
+    val store = remember(context) { JarvisStore(context) }
     var task by remember { mutableStateOf("") }
     var tasks by remember { mutableStateOf(store.getTasks()) }
     Column(Modifier.fillMaxSize().padding(18.dp)) {
