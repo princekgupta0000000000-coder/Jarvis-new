@@ -13,6 +13,10 @@
         <package android:name="com.google.android.apps.messaging" />
         <package android:name="com.google.android.calendar" />
         <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <intent>
             <action android:name="android.intent.action.VIEW" />
             <category android:name="android.intent.category.BROWSABLE" />
             <data android:scheme="https" />
@@ -23,7 +27,8 @@
         android:allowBackup="true"
         android:label="JARVIS"
         android:supportsRtl="true"
-        android:theme="@style/Theme.Jarvis">
+        android:theme="@style/Theme.Jarvis"
+        android:largeHeap="true">
         <activity android:name=".ModelPickerActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
