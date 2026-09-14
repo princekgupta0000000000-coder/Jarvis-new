@@ -60,6 +60,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
@@ -79,35 +81,31 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 41)
-        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 41)
         tts = TextToSpeech(this) { if (it == TextToSpeech.SUCCESS) tts?.language = Locale.US }
         setContent { JarvisApp(this) }
     }
 
-    fun speak(text: String) { tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "jarvis") }
+    fun speak(text: String) { if (text.isNotBlank()) tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "jarvis") }
 
-    fun listen(onText: (String) -> Unit) {
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 41); return
-        }
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) { speak("Speech recognition is unavailable"); return }
+    fun listen(onStatus: (String) -> Unit) {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) { requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 41); return }
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) { speak("Speech recognition is unavailable"); onStatus("VOICE ENGINE UNAVAILABLE"); return }
+        onStatus("LISTENING • SPEAK NOW")
         recognizer?.destroy()
         recognizer = SpeechRecognizer.createSpeechRecognizer(this)
         recognizer?.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) = Unit
-            override fun onBeginningOfSpeech() = Unit
+            override fun onBeginningOfSpeech() { onStatus("HEARING YOU…") }
             override fun onRmsChanged(rmsdB: Float) = Unit
             override fun onBufferReceived(buffer: ByteArray?) = Unit
             override fun onEndOfSpeech() = Unit
             override fun onPartialResults(partialResults: Bundle?) = Unit
             override fun onEvent(eventType: Int, params: Bundle?) = Unit
-            override fun onError(error: Int) { speak("I could not understand that") }
+            override fun onError(error: Int) { onStatus("VOICE ERROR • TAP CORE TO TRY AGAIN") }
             override fun onResults(results: Bundle?) {
                 val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull() ?: return
-                onText(text)
-                speak(JarvisCommandRouter.execute(this@MainActivity, text))
+                processInput(text, onStatus)
             }
         })
         recognizer?.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -117,26 +115,49 @@ class MainActivity : ComponentActivity() {
         })
     }
 
-    fun openBrowser(url: String) {
-        runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(if (url.startsWith("http")) url else "https://$url"))) }
+    fun processInput(text: String, onStatus: (String) -> Unit = {}) {
+        val genericApp = runCatching { JarvisAppLauncher.tryOpen(this, text) }.getOrNull()
+        if (genericApp != null) { val reply = "Opening $genericApp"; onStatus(reply.uppercase(Locale.US)); speak(reply); return }
+
+        val response = JarvisCommandRouter.execute(this, text)
+        if (response.startsWith("I heard:")) {
+            onStatus("LOCAL GEMMA • THINKING…")
+            lifecycleScope.launch {
+                val answer = StringBuilder()
+                val result = JarvisAiEngine.ask(this@MainActivity, text) { token ->
+                    answer.append(token)
+                    runOnUiThread { onStatus(answer.toString().takeLast(180)) }
+                }
+                result.onSuccess {
+                    val finalText = answer.toString().trim().ifBlank { "I couldn't generate a response." }
+                    onStatus(finalText.takeLast(180))
+                    speak(finalText)
+                }.onFailure {
+                    val message = "Local AI is not ready: ${it.message ?: "model load failed"}"
+                    onStatus(message.uppercase(Locale.US).take(180))
+                    speak(message)
+                }
+            }
+        } else {
+            onStatus(response)
+            speak(response)
+        }
     }
 
+    fun openBrowser(url: String) { runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(if (url.startsWith("http")) url else "https://$url"))) } }
     fun startAssistantService() {
-        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 42)
-        }
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 42)
         val i = Intent(this, JarvisVoiceService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(i) else startService(i)
     }
     fun stopAssistantService() { stopService(Intent(this, JarvisVoiceService::class.java)) }
-
     override fun onDestroy() { recognizer?.destroy(); tts?.shutdown(); super.onDestroy() }
 }
 
 @Composable
 fun JarvisApp(activity: MainActivity) {
     var tab by remember { mutableIntStateOf(0) }
-    var spoken by remember { mutableStateOf("SYSTEM READY • TAP CORE TO SPEAK") }
+    var spoken by remember { mutableStateOf("SYSTEM READY • LOCAL AI CORE STANDBY") }
     MaterialTheme(colorScheme = darkColorScheme(primary = Cyan, background = Bg, surface = Panel)) {
         Column(Modifier.fillMaxSize().background(Bg)) {
             Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -154,43 +175,39 @@ fun JarvisApp(activity: MainActivity) {
 }
 
 @Composable
-fun Home(activity: MainActivity, spoken: String, onVoice: (String) -> Unit) {
+fun Home(activity: MainActivity, spoken: String, onStatus: (String) -> Unit) {
     var attendance by remember { mutableStateOf(false) }
+    var prompt by remember { mutableStateOf("") }
     val time = LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm"))
     val date = LocalDate.now().format(DateTimeFormatter.ofPattern("dd MMM yyyy"))
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp)) {
         item {
             Spacer(Modifier.height(18.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Column {
-                    Text("J A R V I S", color = Cyan, fontSize = 22.sp)
-                    Text("PERSONAL AI SYSTEM", color = Muted, fontSize = 9.sp)
-                }
-                Column(horizontalAlignment = Alignment.End) {
-                    Text(time, color = Color.White, fontSize = 17.sp)
-                    Text(date, color = Muted, fontSize = 9.sp)
-                }
+                Column { Text("J A R V I S", color = Cyan, fontSize = 22.sp); Text("PERSONAL AI SYSTEM", color = Muted, fontSize = 9.sp) }
+                Column(horizontalAlignment = Alignment.End) { Text(time, color = Color.White, fontSize = 17.sp); Text(date, color = Muted, fontSize = 9.sp) }
             }
             Spacer(Modifier.height(12.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(7.dp).clip(CircleShape).background(Green))
-                Spacer(Modifier.width(7.dp))
-                Text("ONLINE • LOCAL COMMAND ENGINE", color = Green, fontSize = 9.sp)
-            }
+            Row(verticalAlignment = Alignment.CenterVertically) { Box(Modifier.size(7.dp).clip(CircleShape).background(Green)); Spacer(Modifier.width(7.dp)); Text("ONLINE • GEMMA LOCAL CORE", color = Green, fontSize = 9.sp) }
             Spacer(Modifier.height(6.dp))
-            Text(spoken, color = Cyan, fontSize = 10.sp)
-            AiCore { activity.listen(onVoice) }
+            Text(spoken, color = Cyan, fontSize = 10.sp, maxLines = 3)
+            AiCore { activity.listen(onStatus) }
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(prompt, { prompt = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("Ask JARVIS anything…") })
+                Spacer(Modifier.width(7.dp))
+                Button(onClick = { val q = prompt.trim(); if (q.isNotEmpty()) { prompt = ""; activity.processInput(q, onStatus) } }, colors = ButtonDefaults.buttonColors(containerColor = Cyan)) { Text("ASK", color = Bg) }
+            }
             SectionTitle("SYSTEM SNAPSHOT")
             Snapshot("NEXT CLASS", "Ask: \"aaj ki class kya hai\"")
             Snapshot("ATTENDANCE", "Open calculator → set your real numbers") { attendance = true }
-            Snapshot("STUDY", "NEET + College progress")
+            Snapshot("LOCAL MODEL", "Gemma 3n E4B IT • Q4_K_M • on-device")
             Spacer(Modifier.height(10.dp))
             SectionTitle("COMMAND DECK")
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                Action("YouTube") { activity.openBrowser("https://www.youtube.com") }
-                Action("Google") { activity.openBrowser("https://www.google.com") }
-                Action("Chrome") { activity.openBrowser("https://www.google.com") }
-                Action("Search") { activity.openBrowser("https://www.google.com") }
+                Action("YouTube") { activity.processInput("open youtube", onStatus) }
+                Action("Chrome") { activity.processInput("open chrome", onStatus) }
+                Action("WhatsApp") { activity.processInput("open whatsapp", onStatus) }
+                Action("Search") { activity.processInput("search for ", onStatus) }
             }
             Spacer(Modifier.height(18.dp))
         }
@@ -206,10 +223,7 @@ fun AiCore(click: () -> Unit) {
         Box(Modifier.size(230.dp).alpha(.16f * pulse).border(1.dp, Cyan, CircleShape))
         Box(Modifier.size(185.dp).alpha(.3f * pulse).border(1.dp, Blue, CircleShape))
         Box(Modifier.size(142.dp).clip(CircleShape).background(Brush.radialGradient(listOf(Cyan.copy(.55f), Blue.copy(.22f), Color.Transparent))).border(2.dp, Cyan.copy(.9f), CircleShape).clickable { click() }, contentAlignment = Alignment.Center) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("J", color = Color.White, fontSize = 58.sp)
-                Text("LISTEN", color = Cyan, fontSize = 9.sp)
-            }
+            Column(horizontalAlignment = Alignment.CenterHorizontally) { Text("J", color = Color.White, fontSize = 58.sp); Text("LISTEN", color = Cyan, fontSize = 9.sp) }
         }
         Text("TAP TO SPEAK", color = Muted, fontSize = 9.sp, modifier = Modifier.align(Alignment.BottomCenter))
     }
@@ -220,16 +234,12 @@ fun AiCore(click: () -> Unit) {
 @Composable
 fun Snapshot(title: String, text: String, click: (() -> Unit)? = null) {
     Column(Modifier.fillMaxWidth().padding(vertical = 3.dp).clip(RoundedCornerShape(15.dp)).background(Panel).border(1.dp, Cyan.copy(.07f), RoundedCornerShape(15.dp)).clickable(enabled = click != null) { click?.invoke() }.padding(13.dp)) {
-        Text(title, color = Cyan, fontSize = 9.sp)
-        Text(text, color = Color.White, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+        Text(title, color = Cyan, fontSize = 9.sp); Text(text, color = Color.White, fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
     }
 }
 
-@Composable
-fun RowScope.Action(text: String, action: () -> Unit) {
-    Box(Modifier.weight(1f).height(46.dp).clip(RoundedCornerShape(11.dp)).background(Panel2).border(1.dp, Cyan.copy(.12f), RoundedCornerShape(11.dp)).clickable { action() }, contentAlignment = Alignment.Center) {
-        Text(text, color = Color.White, fontSize = 9.sp)
-    }
+@Composable fun RowScope.Action(text: String, action: () -> Unit) {
+    Box(Modifier.weight(1f).height(46.dp).clip(RoundedCornerShape(11.dp)).background(Panel2).border(1.dp, Cyan.copy(.12f), RoundedCornerShape(11.dp)).clickable { action() }, contentAlignment = Alignment.Center) { Text(text, color = Color.White, fontSize = 9.sp) }
 }
 
 @Composable
@@ -239,20 +249,12 @@ fun AttendanceDialog(close: () -> Unit) {
     var present by remember { mutableStateOf(store.getPresent().toString()) }
     var total by remember { mutableStateOf(store.getTotal().toString()) }
     var target by remember { mutableStateOf(store.getTarget().toString()) }
-    val p = present.toIntOrNull() ?: 0
-    val t = total.toIntOrNull() ?: 0
+    val p = present.toIntOrNull() ?: 0; val t = total.toIntOrNull() ?: 0
     val targetPct = (target.toDoubleOrNull() ?: 75.0).coerceIn(1.0, 100.0)
     val current = if (t > 0) p.toDouble() / t * 100 else 0.0
-    val safeMiss = if (p.toDouble() / (t + 1) >= targetPct / 100) Int.MAX_VALUE else ((p - targetPct / 100 * t) / (targetPct / 100)).toInt().coerceAtLeast(0)
+    val safeMiss = if (t <= 0) 0 else if (p.toDouble() / (t + 1) >= targetPct / 100) Int.MAX_VALUE else ((p - targetPct / 100 * t) / (targetPct / 100)).toInt().coerceAtLeast(0)
     AlertDialog(onDismissRequest = close, containerColor = Panel2, title = { Text("ATTENDANCE", color = Cyan) }, text = {
-        Column {
-            Field("Present classes", present) { present = it }
-            Field("Total classes", total) { total = it }
-            Field("Target %", target) { target = it }
-            Spacer(Modifier.height(8.dp))
-            Text("Current: ${"%.1f".format(current)}%", color = Color.White)
-            Text(if (safeMiss == Int.MAX_VALUE) "You can miss additional classes while staying above target." else "Safe classes to miss: $safeMiss", color = Green)
-        }
+        Column { Field("Present classes", present) { present = it }; Field("Total classes", total) { total = it }; Field("Target %", target) { target = it }; Spacer(Modifier.height(8.dp)); Text("Current: ${"%.1f".format(current)}%", color = Color.White); Text(if (safeMiss == Int.MAX_VALUE) "You can miss additional classes while staying above target." else "Safe classes to miss: $safeMiss", color = Green) }
     }, confirmButton = { TextButton(onClick = { store.setAttendance(p, t, targetPct.toInt()); close() }) { Text("SAVE", color = Cyan) } })
 }
 
@@ -260,102 +262,58 @@ fun AttendanceDialog(close: () -> Unit) {
 
 @Composable
 fun ScheduleScreen() {
-    val context = LocalContext.current
-    val store = remember(context) { JarvisStore(context) }
-    val rows = store.getSchedule()
+    val context = LocalContext.current; val store = remember(context) { JarvisStore(context) }; val rows = store.getSchedule()
     val days = listOf("MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY")
     LazyColumn(Modifier.fillMaxSize().padding(18.dp)) {
-        item { ScreenHeader("COLLEGE SCHEDULE", "Saved locally • ask JARVIS about today's classes") }
-        days.forEach { day ->
-            val dayRows = rows.filter { it.startsWith("$day|") }
-            if (dayRows.isNotEmpty()) item { DayCard(day, dayRows) }
-        }
-        item { InfoCard("HOLIDAYS", "Holiday/working-day calculation is ready for stored timetable data; add your actual college holidays before relying on attendance predictions.") }
+        item { ScreenHeader("COLLEGE SCHEDULE", "SIT Sitamarhi • CSE (AI & ML) • G2 • Room 204") }
+        days.forEach { day -> val dayRows = rows.filter { it.startsWith("$day|") }; if (dayRows.isNotEmpty()) item { DayCard(day, dayRows) } }
+        item { InfoCard("SEMESTER", "Timetable effective 18 August 2026 • Semester ends 31 December 2026 • G2 labs: Monday PHY LAB, Friday PPS LAB + BE LAB") }
     }
 }
 
-@Composable
-fun DayCard(day: String, rows: List<String>) {
+@Composable fun DayCard(day: String, rows: List<String>) {
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp).clip(RoundedCornerShape(16.dp)).background(Panel).padding(14.dp)) {
         Text(day, color = Cyan, fontSize = 9.sp)
-        rows.forEach { raw ->
-            val p = raw.split("|")
-            Text("${p.getOrElse(1){"Class"}}  •  ${p.getOrElse(2){"--:--"}}  •  ${p.getOrElse(3){"Room"}}", color = Color.White, fontSize = 12.sp, modifier = Modifier.padding(top = 9.dp))
-        }
+        rows.forEach { raw -> val p = raw.split("|"); Text("${p.getOrElse(1){"Class"}}  •  ${p.getOrElse(2){"--:--"}}  •  ${p.getOrElse(3){"Room"}}", color = Color.White, fontSize = 12.sp, modifier = Modifier.padding(top = 9.dp)) }
     }
 }
 
-@Composable
-fun StudyScreen() {
-    LazyColumn(Modifier.fillMaxSize().padding(18.dp)) {
-        item { ScreenHeader("STUDY HUB", "NEET + College") }
-        item { ProgressCard("NEET", .62f) }
-        item { ProgressCard("COLLEGE", .48f) }
-        item { InfoCard("JARVIS MODE", "Use Tasks to build your study queue. Model inference can be added independently without changing your local data.") }
-    }
+@Composable fun StudyScreen() {
+    LazyColumn(Modifier.fillMaxSize().padding(18.dp)) { item { ScreenHeader("STUDY HUB", "NEET + College") }; item { ProgressCard("NEET", .62f) }; item { ProgressCard("COLLEGE", .48f) }; item { InfoCard("JARVIS MODE", "Ask JARVIS to explain a topic, generate revision questions or build a study sequence. Open-ended answers use the selected local Gemma model.") } }
 }
 
-@Composable
-fun ProgressCard(title: String, progress: Float) {
-    Column(Modifier.fillMaxWidth().padding(vertical = 5.dp).clip(RoundedCornerShape(16.dp)).background(Panel).padding(14.dp)) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text(title, color = Color.White); Text("${(progress * 100).toInt()}%", color = Cyan, fontSize = 11.sp) }
-        Spacer(Modifier.height(9.dp)); LinearProgressIndicator({ progress }, Modifier.fillMaxWidth(), color = Cyan)
-    }
+@Composable fun ProgressCard(title: String, progress: Float) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 5.dp).clip(RoundedCornerShape(16.dp)).background(Panel).padding(14.dp)) { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text(title, color = Color.White); Text("${(progress * 100).toInt()}%", color = Cyan, fontSize = 11.sp) }; Spacer(Modifier.height(9.dp)); LinearProgressIndicator({ progress }, Modifier.fillMaxWidth(), color = Cyan) }
 }
 
-@Composable
-fun TasksScreen() {
-    val context = LocalContext.current
-    val store = remember(context) { JarvisStore(context) }
-    var task by remember { mutableStateOf("") }
-    var tasks by remember { mutableStateOf(store.getTasks()) }
+@Composable fun TasksScreen() {
+    val context = LocalContext.current; val store = remember(context) { JarvisStore(context) }; var task by remember { mutableStateOf("") }; var tasks by remember { mutableStateOf(store.getTasks()) }
     Column(Modifier.fillMaxSize().padding(18.dp)) {
         ScreenHeader("TASK MATRIX", "Persistent study tasks")
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(task, { task = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("New task") })
-            Spacer(Modifier.width(7.dp)); Button(onClick = { if (task.isNotBlank()) { tasks = tasks + task.trim(); store.setTasks(tasks); task = "" } }) { Text("ADD") }
-        }
-        tasks.forEachIndexed { index, value ->
-            Row(Modifier.fillMaxWidth().padding(top = 9.dp).clip(RoundedCornerShape(12.dp)).background(Panel).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(value, color = Color.White, modifier = Modifier.weight(1f), fontSize = 12.sp)
-                TextButton(onClick = { tasks = tasks.filterIndexed { i, _ -> i != index }; store.setTasks(tasks) }) { Text("DONE", color = Cyan, fontSize = 9.sp) }
-            }
-        }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) { OutlinedTextField(task, { task = it }, Modifier.weight(1f), singleLine = true, placeholder = { Text("New task") }); Spacer(Modifier.width(7.dp)); Button(onClick = { if (task.isNotBlank()) { tasks = tasks + task.trim(); store.setTasks(tasks); task = "" } }) { Text("ADD") } }
+        tasks.forEachIndexed { index, value -> Row(Modifier.fillMaxWidth().padding(top = 9.dp).clip(RoundedCornerShape(12.dp)).background(Panel).padding(12.dp), verticalAlignment = Alignment.CenterVertically) { Text(value, color = Color.White, modifier = Modifier.weight(1f), fontSize = 12.sp); TextButton(onClick = { tasks = tasks.filterIndexed { i, _ -> i != index }; store.setTasks(tasks) }) { Text("DONE", color = Cyan, fontSize = 9.sp) } } }
     }
 }
 
-@Composable
-fun MoreScreen(activity: MainActivity) {
+@Composable fun MoreScreen(activity: MainActivity) {
     var active by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().padding(18.dp)) {
-        ScreenHeader("SYSTEM CONTROL", "Voice session and model")
+        ScreenHeader("SYSTEM CONTROL", "Voice • local model • Android actions")
         SettingRow("VOICE SESSION", "Foreground microphone session", active) { active = it; if (it) activity.startAssistantService() else activity.stopAssistantService() }
         SettingRow("WAKE PHRASE", "Hello Jarvis • Android/OEM may restrict always-on listening", false) { }
-        InfoCard("LOCAL MODEL", "Your GGUF file is selected through the model picker. The current app keeps its URI locally; inference runtime integration is the next engine layer.")
+        InfoCard("LOCAL GEMMA", "The selected GGUF is copied once to app-private storage and loaded through llama.cpp. The model file itself is never stored in GitHub.")
+        InfoCard("AI PIPELINE", "Voice/Text → command router → Android action or local Gemma → streamed tokens → JARVIS voice response")
     }
 }
 
-@Composable
-fun SettingRow(title: String, subtitle: String, checked: Boolean, onChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 5.dp).clip(RoundedCornerShape(15.dp)).background(Panel).padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) { Text(title, color = Color.White, fontSize = 13.sp); Text(subtitle, color = Muted, fontSize = 9.sp) }
-        Switch(checked, onChange)
-    }
+@Composable fun SettingRow(title: String, subtitle: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 5.dp).clip(RoundedCornerShape(15.dp)).background(Panel).padding(14.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(title, color = Color.White, fontSize = 13.sp); Text(subtitle, color = Muted, fontSize = 9.sp) }; Switch(checked, onChange) }
 }
 
 @Composable fun ScreenHeader(title: String, subtitle: String) { Column(Modifier.padding(bottom = 10.dp)) { Text(title, color = Color.White, fontSize = 22.sp); Text(subtitle, color = Muted, fontSize = 11.sp) } }
+@Composable fun InfoCard(title: String, text: String) { Column(Modifier.fillMaxWidth().padding(vertical = 5.dp).clip(RoundedCornerShape(16.dp)).background(Panel).padding(14.dp)) { Text(title, color = Cyan, fontSize = 9.sp); Text(text, color = Color.White, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp)) } }
 
-@Composable
-fun InfoCard(title: String, text: String) {
-    Column(Modifier.fillMaxWidth().padding(vertical = 5.dp).clip(RoundedCornerShape(16.dp)).background(Panel).padding(14.dp)) {
-        Text(title, color = Cyan, fontSize = 9.sp); Text(text, color = Color.White, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
-    }
-}
-
-@Composable
-fun BottomBar(selected: Int, onSelect: (Int) -> Unit) {
+@Composable fun BottomBar(selected: Int, onSelect: (Int) -> Unit) {
     val labels = listOf("CORE", "SCHEDULE", "STUDY", "TASKS", "SYSTEM")
-    Row(Modifier.fillMaxWidth().background(Color(0xFF050D17)).padding(vertical = 4.dp)) {
-        labels.forEachIndexed { i, label -> TextButton(onClick = { onSelect(i) }, Modifier.weight(1f)) { Text(label, color = if (i == selected) Cyan else Muted, fontSize = 8.sp) } }
-    }
+    Row(Modifier.fillMaxWidth().background(Color(0xFF050D17)).padding(vertical = 4.dp)) { labels.forEachIndexed { i, label -> TextButton(onClick = { onSelect(i) }, Modifier.weight(1f)) { Text(label, color = if (i == selected) Cyan else Muted, fontSize = 8.sp) } } }
 }
